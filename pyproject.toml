@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "airflow-task"
+version = "0.1.0"
+description = ""
+authors = ["Wiktor Czyż <czyz.wiktor@gmail.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.7"
+apache-airflow = "^2.3.3"
+python-dotenv = "^0.20.0"
+tweepy = "^4.10.0"
+spark = "^0.2.1"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
