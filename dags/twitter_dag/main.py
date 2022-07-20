@@ -1,11 +1,12 @@
 from airflow.models.dag import dag
-from airflow.operators.python import task
+from airflow.decorators import task
 from airflow.utils.dates import days_ago
 
 from dotenv import load_dotenv
 import json
 import os
 import pandas as pd
+import psycopg2
 import tweepy
 
 @dag(
@@ -16,7 +17,7 @@ import tweepy
 def twitter_etl():
     dag_path = "/opt/airflow/dags/twitter_dag"
 
-    @task()
+    @task
     def fetch() -> str:
         """
         Fetch tweets from Twitter API and save on disk as JSON.
@@ -32,7 +33,7 @@ def twitter_etl():
         json.dump(tweets_json, out_file, indent=4)
         return tweets_path
 
-    @task()
+    @task
     def count_per_language(path: str) -> str:
         """
         Count the number of tweets per language.
@@ -50,8 +51,8 @@ def twitter_etl():
 
         return output_path
 
-    @task()
-    def shopify_retweets(path: str):
+    @task
+    def shopify_retweets(path: str) -> str:
         """
         Count the number of total retweets of the hashtag "Shopify"
         Save csv on disk and return file's path.
@@ -67,13 +68,13 @@ def twitter_etl():
 
         if not os.path.exists(output_directory):
             os.makedirs(output_directory)
-        df = pd.DataFrame([total_retweets], columns=["total_retweets"])
-        df.to_csv(output_path)
+        df = pd.DataFrame([total_retweets], columns=["retweets"])
+        df.to_csv(output_path, index=False)
 
         return output_path
 
-    @task()
-    def all_hashtags(path: str):
+    @task
+    def all_hashtags(path: str) -> str:
         """
         Find all hashtags in the tweets.
         Save csv on disk and return file's path.
@@ -92,11 +93,68 @@ def twitter_etl():
             os.makedirs(output_directory)
         df = pd.DataFrame(hashtags)
         df.to_csv(output_path)
+        return output_path
+
+    def table_exists(db_cursor, table_name: str) -> bool:
+        db_cursor.execute("SELECT EXISTS(SELECT * FROM information_schema.tables WHERE table_name=%s)", (table_name,))
+        return db_cursor.fetchone()[0]
+
+    @task
+    def load_per_language(path: str, db_cursor):
+        """
+        Load csv with per language information into Postgres database.
+        """
+        contents = open(path, 'r')
+        table_name = "per_language"
+        if not table_exists(db_cursor, table_name):
+            db_cursor.execute(f"CREATE TABLE {table_name} (lang varchar PRIMARY KEY, count integer);")
+        else:
+            db_cursor.execute(f"TRUNCATE {table_name}")
+        db_cursor.copy_from(contents, table_name, columns=("lang", "count"), sep=",")
+
+    @task
+    def load_retweets(path: str, db_cursor):
+        """
+        Load csv with shopify retweets count into Postgres database.
+        """
+        contents = open(path, 'r')
+        table_name = "shopify_retweets"
+        if not table_exists(db_cursor, table_name):
+            db_cursor.execute(f"CREATE TABLE {table_name} (retweets integer PRIMARY KEY);")
+        else:
+            db_cursor.execute(f"TRUNCATE {table_name}")
+        db_cursor.copy_expert(f"COPY {table_name}(retweets) FROM STDIN WITH HEADER CSV", contents)
+
+    @task
+    def load_hashtags(path: str, db_cursor):
+        """
+        Load csv with hashtags into Postgres database.
+        """
+        contents = open(path, 'r')
+        table_name = "hashtags"
+        if not table_exists(db_cursor, table_name):
+            db_cursor.execute(f"CREATE TABLE {table_name} (id integer PRIMARY KEY, hashtag varchar);")
+        else:
+            db_cursor.execute(f"TRUNCATE {table_name}")
+        db_cursor.copy_expert(f"COPY {table_name}(id, hashtag) FROM STDIN WITH HEADER CSV", contents)
 
     tweets_path = fetch()
 
-    count_per_language(tweets_path)
-    shopify_retweets(tweets_path)
-    all_hashtags(tweets_path)
+    per_language_path = count_per_language(tweets_path)
+    retweets_path = shopify_retweets(tweets_path)
+    hashtags_path = all_hashtags(tweets_path)
+
+    host = "postgres"
+    port = "5432"
+    dbname = "airflow"
+    user = "airflow"
+    password = "airflow"
+    db_conn = psycopg2.connect(host=host, port=port, dbname=dbname, user=user, password=password)
+    db_conn.autocommit = True
+    db_cursor = db_conn.cursor()
+
+    load_per_language(per_language_path, db_cursor)
+    load_retweets(retweets_path, db_cursor)
+    load_hashtags(hashtags_path, db_cursor)
 
 twitter_dag = twitter_etl()
